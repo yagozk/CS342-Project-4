@@ -70,7 +70,8 @@ typedef struct {
     char filename[MAX_FILENAME_LENGTH];
     int fileSize;
     int startBlock;
-    // Add any other attributes you find necessary
+    
+    // Add other attributes if necessary
 } DirectoryEntry;
 
 #define FAT_UNALLOCATED -1 // fat entry is unallocated
@@ -85,6 +86,34 @@ typedef struct {
 FatEntry *fat;
 struct SuperBlock superblock;
 DirectoryEntry *rootDir;
+
+typedef struct {
+    int fd; // File descriptor
+    char filename[MAX_FILENAME_LENGTH];
+    int mode; // MODE_READ or MODE_APPEND
+    
+    // Add other attributes if necessary
+} OpenFileEntry;
+
+OpenFileEntry openFileTable[128]; // since we have 128 files max
+
+/********************************************************************
+    Helper functions, not called directly by applications
+********************************************************************/
+// Find a free block in the FAT table
+int find_free_block() {
+    // Iterate through the FAT table to find the first available block
+    for (int i = 0; i < FAT_TABLE_LENGTH; i++) {
+        if (fat[i].next == FAT_UNALLOCATED) {
+            // Mark the block as allocated in the FAT table, but no next entry yet!
+            fat[i].next = FAT_NO_NEXT;
+            return i;
+        }
+    }
+    return -1; // No free blocks available
+}
+
+
 
 /**********************************************************************
    The following functions are to be called by applications directly. 
@@ -140,6 +169,11 @@ int vsformat (char *vdiskname, unsigned int m)
         write_block(&rootDir, i);
     }
 
+    // Initialize open file table
+    for (int i = 0; i < ROOT_DIR_LENGTH; i++){
+        openFileTable[i].fd = -1; //no open files initially
+    }
+
     close(vdiskname);
 
     return (0); 
@@ -188,19 +222,6 @@ int vsumount ()
     return (0); 
 }
 
-// Find a free block in the FAT table
-int find_free_block() {
-    // Iterate through the FAT table to find the first available block
-    for (int i = 0; i < FAT_TABLE_LENGTH; i++) {
-        if (fat[i].next == FAT_UNALLOCATED) {
-            // Mark the block as allocated in the FAT table, but no next entry yet!
-            fat[i].next = FAT_NO_NEXT;
-            return i;
-        }
-    }
-    return -1; // No free blocks available
-}
-
 int vscreate(char *filename)
 {
     // Search for an empty slot in the root directory
@@ -237,10 +258,66 @@ int vscreate(char *filename)
 }
 
 
-int vsopen(char *file, int mode)
+int vsopen(char *filename, int mode)
 {
-    //todo
-    return (0); 
+    // Search for the file in the root directory
+    int fileIndex = -1;
+    for (int i = 0; i < ROOT_DIR_LENGTH; i++) {
+        if (strcmp(rootDir[i].filename, filename) == 0) {
+            fileIndex = i;
+            break;
+        }
+    }    
+
+    // If the file is not found, return an error
+    if (fileIndex == -1) {
+        printf("Error in vsopen: File not found\n");
+        return -1;
+    }
+
+    // Check if the file is already open in the specified mode
+    for (int i = 0; i < ROOT_DIR_LENGTH; i++) {
+        if (openFileTable[i].fd >= 0 && strcmp(openFileTable[i].filename, filename) == 0) {
+            if (openFileTable[i].mode == mode) {
+                printf("vsopen warning: File is already open in the specified mode.\nReturning existing file descriptor.\n");
+                return openFileTable[i].fd;
+            } else {
+                printf("vsopen warning: File is already open in a different mode.\nReturning existing file descriptor.\n");
+                return -1;
+            }
+        }
+    }
+
+    // Find an available entry in the open file table
+    int openFileIndex = -1;
+    for (int i = 0; i < ROOT_DIR_LENGTH; i++) {
+        if (openFileTable[i].fd == -1) {
+            openFileIndex = i;
+            break;
+        }
+    }
+    // If there's no available entry in the open file table, return an error
+    if (openFileIndex == -1) {
+        printf("Error in vsopen: Could not find available space for opening the file\n");
+        return -1;
+    }
+
+    // Initialize the open file table entry
+    snprintf(openFileTable[openFileIndex].filename, MAX_FILENAME_LENGTH, "%s", filename);
+    openFileTable[openFileIndex].mode = mode;
+
+    // Open the file based on the access mode
+    if (mode == MODE_READ) {
+        openFileTable[openFileIndex].fd = open(filename, O_RDONLY);
+    } else if (mode == MODE_APPEND) {
+        openFileTable[openFileIndex].fd = open(filename, O_APPEND);
+    } else {
+        printf("Error in vsopen: Invalid access mode\n");
+        return -1;
+    }
+
+    // Return the index of the opened file in the openfile table
+    return openFileIndex;
 }
 
 int vsclose(int fd){
