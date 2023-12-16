@@ -15,6 +15,7 @@
 #define ROOT_DIR_LENGTH 128
 
 #define MAX_FILENAME_LENGTH 30
+#define METADATA_OFFSET 41 // since first 41 blocks are for metadata
 
 // globals  =======================================
 int vs_fd; // file descriptor of the Linux file that acts as virtual disk.
@@ -59,12 +60,12 @@ int write_block (void *block, int k)
 
 ///////////////////////////////////////////////////////////////
 
-struct SuperBlock {
+typedef struct {
     int blockSize;
     int fatSize;
     int rootDirSize;
     int diskSize;
-};
+} SuperBlock;
 
 typedef struct {
     char filename[MAX_FILENAME_LENGTH];
@@ -75,7 +76,7 @@ typedef struct {
 } DirectoryEntry;
 
 #define FAT_UNALLOCATED -1 // fat entry is unallocated
-#define FAT_NO_NEXT -2 // fat entry is allocated but no next entry
+#define FAT_NO_NEXT -2 // fat entry is allocated but has no next entry (tail of the list)
 
 typedef struct {
     int next; // Pointer to the next cluster
@@ -84,18 +85,23 @@ typedef struct {
 } FatEntry;
 
 FatEntry *fat;
-struct SuperBlock superblock;
+SuperBlock superblock;
 DirectoryEntry *rootDir;
 
 typedef struct {
-    int fd; // File descriptor
+    int fd; // File descriptor returned from open()
     char filename[MAX_FILENAME_LENGTH];
     int mode; // MODE_READ or MODE_APPEND
     
     // Add other attributes if necessary
 } OpenFileEntry;
 
-OpenFileEntry openFileTable[128]; // since we have 128 files max
+OpenFileEntry openFileTable[16]; 
+
+// typedef struct {
+//     char* data;
+// } DataBlock;
+// DataBlock *dataBlocks;
 
 /********************************************************************
     Helper functions, not called directly by applications
@@ -105,15 +111,29 @@ int find_free_block() {
     // Iterate through the FAT table to find the first available block
     for (int i = 0; i < FAT_TABLE_LENGTH; i++) {
         if (fat[i].next == FAT_UNALLOCATED) {
-            // Mark the block as allocated in the FAT table, but no next entry yet!
+            // Mark the block as allocated in the FAT table, but has no next entry yet!
             fat[i].next = FAT_NO_NEXT;
             return i;
         }
     }
     return -1; // No free blocks available
 }
+    
+// Check if the file descriptor is valid
+int checkFdValidity(int fd){
+    if (fd < 0 || fd >= ROOT_DIR_LENGTH || openFileTable[fd].fd == -1) {
+        return -1;
+    }
+}
 
-
+int find_file_by_name(const char *filename) {
+    for (int i = 0; i < ROOT_DIR_LENGTH; i++) {
+        if (strcmp(rootDir[i].filename, filename) == 0) {
+            return i; // File found, return its index
+        }
+    }
+    return -1; // File not found
+}
 
 /**********************************************************************
    The following functions are to be called by applications directly. 
@@ -161,8 +181,8 @@ int vsformat (char *vdiskname, unsigned int m)
     for (int i = 0; i < ROOT_DIR_LENGTH; i++) {
         strcpy(rootDir[i].filename, "\0"); // Set filename to "\0" to mark as empty slot
         rootDir[i].fileSize = 0;
-        rootDir[i].startBlock = FAT_UNALLOCATED; // Set an invalid value for start block
-        // Initialize any other attributes as necessary
+        rootDir[i].startBlock = FAT_UNALLOCATED;
+        // Initialize any other attributes if necessary
     }
     // Write root directory to the virtual disk (blocks FAT_SIZE+1 to FAT_SIZE+ROOT_DIR_SIZE)
     for (int i = FAT_SIZE_IN_BLOCKS + 1; i <= FAT_SIZE_IN_BLOCKS + ROOT_DIR_SIZE_IN_BLOCKS; i++) {
@@ -173,6 +193,13 @@ int vsformat (char *vdiskname, unsigned int m)
     for (int i = 0; i < ROOT_DIR_LENGTH; i++){
         openFileTable[i].fd = -1; //no open files initially
     }
+
+    // Initialize data blocks
+    // dataBlocks = (DataBlock *)malloc(size - (41 * BLOCKSIZE)); //since first 41 blocks are for metadata
+    // Write data blocks to the virtual disk 
+    // for (int i = FAT_SIZE_IN_BLOCKS + ROOT_DIR_SIZE_IN_BLOCKS + 1; i <= (size/BLOCKSIZE) - 41; i++) {
+    //     write_block(&dataBlocks, i);
+    // }
 
     close(vdiskname);
 
@@ -197,7 +224,9 @@ int  vsmount (char *vdiskname)
     // load root directory from disk into memory
     for (int i = FAT_SIZE_IN_BLOCKS + 1; i <= FAT_SIZE_IN_BLOCKS + ROOT_DIR_SIZE_IN_BLOCKS; i++) {
         read_block(&rootDir, i);
-    }    return(0);
+    }    
+    
+    return(0);
 }
 
 
@@ -320,32 +349,86 @@ int vsopen(char *filename, int mode)
     return openFileIndex;
 }
 
+// Returns 0 on success, -1 on failure
 int vsclose(int fd){
-    //todo
-    return (0); 
+
+    if (checkFdValidity(fd) < 0){
+        printf("Error in vsclose: Either the file descriptor is invalid or the specified file is not open\n");
+        return -1;
+    }
+
+    // Close the file using the file descriptor
+    int result = close(openFileTable[fd].fd);
+    if (result < 0){
+        printf("Error while closing file with fd %d", fd);
+        return -1;
+    }
+    // Mark the open file table entry as free
+    openFileTable[fd].fd = -1;
+    openFileTable[fd].mode = -1; // Reset mode
+
+    return 0;
 }
 
 int vssize (int  fd)
 {
-    //todo
-    return (0); 
+    if (checkFdValidity(fd) < 0){
+        printf("Error in vssize: Either the file descriptor is invalid or the specified file is not open\n");
+        return -1;
+    }
+
+    // Use the open file table to get the file size
+    return rootDir[find_file_by_name(openFileTable[fd].filename)].fileSize;
+
 }
 
 int vsread(int fd, void *buf, int n){
-    //todo
-    return (0); 
+    int fileIndexInDirectory = find_file_by_name(openFileTable[fd].filename);
+    int currentBlock = rootDir[fileIndexInDirectory].startBlock;
+    
+    int i = 0;
+    int numOfBlocksToRead = n % BLOCKSIZE;
+
+    while (currentBlock != FAT_NO_NEXT && i < numOfBlocksToRead) {
+        // todo
+    }
+
+    return 0; 
 }
 
 
 int vsappend(int fd, void *buf, int n)
 {
-    //todo
+    // todo
     return (0); 
 }
 
 int vsdelete(char *filename)
 {
-    //todo
-    return (0); 
+    // Search for the file in the root directory
+    int fileIndex = find_file_by_name(filename);
+
+    // If the file is not found, return an error
+    if (fileIndex == -1) {
+        printf("Error in vsdelete: File not found\n");
+        return -1;
+    }
+
+    // Free the blocks in the FAT table and the data table 
+    int currentBlock = rootDir[fileIndex].startBlock;
+    while (currentBlock != FAT_NO_NEXT) {
+        // write the deleted data block back to the virtual disk
+        write_block(NULL, currentBlock + METADATA_OFFSET); 
+
+        int nextBlock = fat[currentBlock].next;
+        fat[currentBlock].next = FAT_UNALLOCATED; // Mark block as unallocated
+        currentBlock = nextBlock;
+    }
+
+    // Clear the directory entry for the file
+    strcpy(rootDir[fileIndex].filename, "\0");
+    rootDir[fileIndex].fileSize = 0;
+    rootDir[fileIndex].startBlock = FAT_UNALLOCATED;
+
 }
 
