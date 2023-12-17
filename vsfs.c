@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <string.h>
 #include <fcntl.h>
 #include "vsfs.h"
 
@@ -124,6 +125,7 @@ int checkFdValidity(int fd){
     if (fd < 0 || fd >= ROOT_DIR_LENGTH || openFileTable[fd].fd == -1) {
         return -1;
     }
+    return fd;
 }
 
 int find_file_by_name(const char *filename) {
@@ -148,10 +150,10 @@ int vsformat (char *vdiskname, unsigned int m)
 
     size  = num << m;
     count = size / BLOCKSIZE;
-    //printf ("%d %d", m, size);
+    printf ("%d %d", m, size);
     sprintf (command, "dd if=/dev/zero of=%s bs=%d count=%d",
              vdiskname, BLOCKSIZE, count);
-    //printf ("executing command = %s\n", command);
+    printf ("executing command = %s\n", command);
     system (command);
 
     // Open the virtual disk for read and write
@@ -173,7 +175,7 @@ int vsformat (char *vdiskname, unsigned int m)
     }
     // Write FAT table to the virtual disk (blocks 1 to FAT_SIZE)
     for (int i = 1; i <= FAT_SIZE_IN_BLOCKS; i++) {
-        write_block(&fat, i);
+        write_block(fat, i);
     }
 
     // Initialize root directory
@@ -186,7 +188,7 @@ int vsformat (char *vdiskname, unsigned int m)
     }
     // Write root directory to the virtual disk (blocks FAT_SIZE+1 to FAT_SIZE+ROOT_DIR_SIZE)
     for (int i = FAT_SIZE_IN_BLOCKS + 1; i <= FAT_SIZE_IN_BLOCKS + ROOT_DIR_SIZE_IN_BLOCKS; i++) {
-        write_block(&rootDir, i);
+        write_block(rootDir, i);
     }
 
     // Initialize open file table
@@ -201,7 +203,7 @@ int vsformat (char *vdiskname, unsigned int m)
     //     write_block(&dataBlocks, i);
     // }
 
-    close(vdiskname);
+    close(vs_fd);
 
     return (0); 
 }
@@ -276,7 +278,8 @@ int vscreate(char *filename)
     // Find the first available block in the FAT table
     int startBlock = find_free_block();
     if (startBlock == -1) {
-        return -1; // No free blocks available in the FAT table
+        printf("Error in vcreate: No free blocks available in the FAT table");
+        return -1;
     }
     newFile.startBlock = startBlock;
 
@@ -382,25 +385,99 @@ int vssize (int  fd)
 
 }
 
-int vsread(int fd, void *buf, int n){
-    int fileIndexInDirectory = find_file_by_name(openFileTable[fd].filename);
-    int currentBlock = rootDir[fileIndexInDirectory].startBlock;
-    
-    int i = 0;
-    int numOfBlocksToRead = n % BLOCKSIZE;
-
-    while (currentBlock != FAT_NO_NEXT && i < numOfBlocksToRead) {
-        // todo
+int vsread(int fd, void *buf, int n) {
+    // Check if the file descriptor is valid
+    if (checkFdValidity(fd) < 0) {
+        printf("Error in vsread: Either the file descriptor is invalid or the specified file is not open\n");
+        return -1;
     }
 
-    return 0; 
+    // Get the file index in the root directory
+    int fileIndexInDirectory = find_file_by_name(openFileTable[fd].filename);
+
+    // Get the start block of the file
+    int currentBlock = rootDir[fileIndexInDirectory].startBlock;
+
+    // Initialize variables to keep track of the number of bytes read and the buffer offset
+    int bytesRead = 0;
+    int bufferOffset = 0;
+
+    // Continue reading until all requested bytes are read or we reach the end of the file
+    while (currentBlock != FAT_NO_NEXT && bytesRead < n) {
+        // Allocate a buffer to store the data block read from the virtual disk
+        char dataBlock[BLOCKSIZE];
+
+        // Read the data block from the virtual disk
+        read_block(dataBlock, currentBlock + METADATA_OFFSET);
+
+        // Calculate the number of bytes to copy from the data block to the buffer
+        int bytesToCopy = (n - bytesRead) < BLOCKSIZE ? (n - bytesRead) : BLOCKSIZE;
+
+        // Copy data from the data block to the buffer
+        memcpy(buf + bufferOffset, dataBlock, bytesToCopy);
+
+        // Update counters
+        bytesRead += bytesToCopy;
+        bufferOffset += bytesToCopy;
+
+        // Move to the next block in the FAT table
+        currentBlock = fat[currentBlock].next;
+    }
+
+    return bytesRead;
 }
 
+int vsappend(int fd, void *buf, int n) {
+    // Check if the file descriptor is valid
+    if (checkFdValidity(fd) < 0) {
+        printf("Error in vsappend: Either the file descriptor is invalid or the specified file is not open\n");
+        return -1;
+    }
 
-int vsappend(int fd, void *buf, int n)
-{
-    // todo
-    return (0); 
+    // Get the file index in the root directory
+    int fileIndexInDirectory = find_file_by_name(openFileTable[fd].filename);
+
+    // Get the start block of the file
+    int currentBlock = rootDir[fileIndexInDirectory].startBlock;
+
+    // Move to the end of the file
+    while (fat[currentBlock].next != FAT_NO_NEXT) {
+        currentBlock = fat[currentBlock].next;
+    }
+
+    // Calculate the offset within the last block
+    int offsetWithinBlock = rootDir[fileIndexInDirectory].fileSize % BLOCKSIZE;
+
+    // Append new data blocks to the file
+    int bytesRead = 0;
+    while (bytesRead < n) {
+        // Check if there's space in the current block
+        int spaceInBlock = BLOCKSIZE - offsetWithinBlock;
+        int bytesToWrite = (n - bytesRead) < spaceInBlock ? (n - bytesRead) : spaceInBlock;
+
+        // Write the data block to the virtual disk
+        write_block(buf + bytesRead, currentBlock + METADATA_OFFSET);
+
+        // Update counters
+        bytesRead += bytesToWrite;
+        rootDir[fileIndexInDirectory].fileSize += bytesToWrite;
+
+        // Check if we need to allocate a new block
+        if (bytesRead < n) {
+            // Find a free block in the FAT table
+            int newBlock = find_free_block();
+
+            // Update the FAT table entry for the new block
+            fat[currentBlock].next = newBlock;
+            fat[newBlock].next = FAT_NO_NEXT;
+
+            // Move to the new block
+            currentBlock = newBlock;
+            offsetWithinBlock = 0;
+        }
+    }
+
+    return bytesRead;
 }
 
 int vsdelete(char *filename)
@@ -430,5 +507,6 @@ int vsdelete(char *filename)
     rootDir[fileIndex].fileSize = 0;
     rootDir[fileIndex].startBlock = FAT_UNALLOCATED;
 
+    return 0;
 }
 
