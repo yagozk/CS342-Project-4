@@ -36,6 +36,7 @@ int read_block (void *block, int k)
     offset = k * BLOCKSIZE;
     lseek(vs_fd, (off_t) offset, SEEK_SET);
     n = read (vs_fd, block, BLOCKSIZE);
+    printf("read data = %d", n);
     if (n != BLOCKSIZE) {
 	printf ("read error\n");
 	return -1;
@@ -66,6 +67,9 @@ typedef struct {
     int fatSize;
     int rootDirSize;
     int diskSize;
+
+    // Padding to make the structure exactly one block
+    char padding[2032];
 } SuperBlock;
 
 typedef struct {
@@ -73,7 +77,8 @@ typedef struct {
     int fileSize;
     int startBlock;
     
-    // Add other attributes if necessary
+    // Padding to make the structure 128 bytes
+    char padding[88];
 } DirectoryEntry;
 
 #define FAT_UNALLOCATED -1 // fat entry is unallocated
@@ -156,28 +161,44 @@ int vsformat (char *vdiskname, unsigned int m)
     printf ("executing command = %s\n", command);
     system (command);
 
+    printf("OPENING VS_FD\n");
     // Open the virtual disk for read and write
     vs_fd = open(vdiskname, O_RDWR);
 
+    printf("INITIALIZING SUPERBLOCK\n");
     // Initialize superblock
     superblock.blockSize = BLOCKSIZE;
     superblock.fatSize = FAT_SIZE_IN_BLOCKS;
     superblock.rootDirSize = ROOT_DIR_SIZE_IN_BLOCKS;
     superblock.diskSize = size;
+    printf("INITIALIZED SUPERBLOCK\n");
+    printf("Size of SuperBlock: %lu bytes\n", sizeof(SuperBlock));    
 
+    printf("WRITING SUPERBLOCK\n");
     // Write superblock to the virtual disk (block 0)
     write_block(&superblock, 0);
+    printf("WROTE SUPERBLOCK\n");
 
     // Initialize FAT table
+    printf("INITIALIZING FAT TABLE\n");
+    printf("Size of FatEntry: %lu bytes\n", sizeof(FatEntry));    
     fat = (FatEntry *)malloc(FAT_TABLE_LENGTH * sizeof(FatEntry));
     for (int i = 0; i < FAT_TABLE_LENGTH; i++) {
         fat[i].next = FAT_UNALLOCATED; // Mark all entries as unallocated
     }
+    printf("INITIALIZED FAT TABLE\n");
+
+    printf("WRITING FAT TABLE\n");
     // Write FAT table to the virtual disk (blocks 1 to FAT_SIZE)
     for (int i = 1; i <= FAT_SIZE_IN_BLOCKS; i++) {
-        write_block(fat, i);
-    }
+        // Calculate the starting index of the FAT entries for this block
+        int startIdx = (i - 1) * (BLOCKSIZE / sizeof(FatEntry));
+        write_block(&fat[startIdx], i);
+    }    
+    printf("WROTE FAT TABLE\n");
 
+    printf("INITIALIZING ROOT DIRECTORY\n");
+    printf("Size of directoryEntry: %lu bytes\n", sizeof(DirectoryEntry));    
     // Initialize root directory
     rootDir = (DirectoryEntry *)malloc(ROOT_DIR_LENGTH * sizeof(DirectoryEntry));
     for (int i = 0; i < ROOT_DIR_LENGTH; i++) {
@@ -186,15 +207,23 @@ int vsformat (char *vdiskname, unsigned int m)
         rootDir[i].startBlock = FAT_UNALLOCATED;
         // Initialize any other attributes if necessary
     }
+    printf("INITIALIZED ROOT DIRECTORY\n");
+
+    printf("WRITING ROOT DIR\n");
     // Write root directory to the virtual disk (blocks FAT_SIZE+1 to FAT_SIZE+ROOT_DIR_SIZE)
     for (int i = FAT_SIZE_IN_BLOCKS + 1; i <= FAT_SIZE_IN_BLOCKS + ROOT_DIR_SIZE_IN_BLOCKS; i++) {
-        write_block(rootDir, i);
-    }
+        // Calculate the starting index of the directory entries for this block
+        int startIdx = (i - (FAT_SIZE_IN_BLOCKS + 1)) * (BLOCKSIZE / sizeof(DirectoryEntry));
+        write_block(&rootDir[startIdx], i);
+    }    
+    printf("WROTE ROOT DIRR\n");
 
+    printf("INITIALIZING OPEN FILE TABLE\n");
     // Initialize open file table
-    for (int i = 0; i < ROOT_DIR_LENGTH; i++){
+    for (int i = 0; i < 16; i++){
         openFileTable[i].fd = -1; //no open files initially
     }
+    printf("INITIALIZED OPEN FILE TABLE\n");
 
     // Initialize data blocks
     // dataBlocks = (DataBlock *)malloc(size - (41 * BLOCKSIZE)); //since first 41 blocks are for metadata
@@ -203,6 +232,7 @@ int vsformat (char *vdiskname, unsigned int m)
     //     write_block(&dataBlocks, i);
     // }
 
+    printf("CLOSING VS_FD\n");
     close(vs_fd);
 
     return (0); 
@@ -216,17 +246,30 @@ int  vsmount (char *vdiskname)
     // vs_fd is global; hence other function can use it. 
     vs_fd = open(vdiskname, O_RDWR);
     // load (chache) the superblock info from disk (Linux file) into memory
+    printf("vs_fd has been opened: %d \n", vs_fd);
+    printf("VSMOUNT: READING SUPERBLOCK \n");
     read_block(&superblock, 0);
+    printf("VSMOUNT: FINISHED READING SUPERBLOCK \n");
 
-    // load the FAT table from disk into memory
+    printf("VSMOUNT: READING FAT \n");
+    // Read FAT table (blocks 1 to FAT_SIZE)
     for (int i = 1; i <= FAT_SIZE_IN_BLOCKS; i++) {
+        // Calculate the starting index of the FAT entries for this block
+        //int startIdx = (i - 1) * (BLOCKSIZE / sizeof(FatEntry));
+        //read_block(&fat[startIdx], i);
         read_block(&fat, i);
-    }
+    }    
+    printf("VSMOUNT: FINISHED READING FAT \n");
 
-    // load root directory from disk into memory
+    printf("VSMOUNT: READING DIRECTORY \n");
+    // Read root directory
     for (int i = FAT_SIZE_IN_BLOCKS + 1; i <= FAT_SIZE_IN_BLOCKS + ROOT_DIR_SIZE_IN_BLOCKS; i++) {
+        // Calculate the starting index of the directory entries for this block
+        // int startIdx = (i - (FAT_SIZE_IN_BLOCKS + 1)) * (BLOCKSIZE / sizeof(DirectoryEntry));
+        // read_block(&rootDir[startIdx], i);
         read_block(&rootDir, i);
     }    
+    printf("VSMOUNT: FINISHED READING DIRECTORY \n");
     
     return(0);
 }
@@ -237,15 +280,19 @@ int vsumount ()
     // Write superblock to the virtual disk file (block 0)
     write_block(&superblock, 0);
 
-    // Write FAT table to the virtual disk file (blocks 1 to FAT_SIZE)
+    // Write FAT table to the virtual disk (blocks 1 to FAT_SIZE)
     for (int i = 1; i <= FAT_SIZE_IN_BLOCKS; i++) {
-        write_block(&fat, i);
-    }
+        // Calculate the starting index of the FAT entries for this block
+        int startIdx = (i - 1) * (BLOCKSIZE / sizeof(FatEntry));
+        write_block(&fat[startIdx], i);
+    }    
 
-    // Write root directory to the virtual disk file (blocks FAT_SIZE+1 to FAT_SIZE+ROOT_DIR_SIZE)
+    // Write root directory to the virtual disk (blocks FAT_SIZE+1 to FAT_SIZE+ROOT_DIR_SIZE)
     for (int i = FAT_SIZE_IN_BLOCKS + 1; i <= FAT_SIZE_IN_BLOCKS + ROOT_DIR_SIZE_IN_BLOCKS; i++) {
-        write_block(&rootDir, i);
-    }
+        // Calculate the starting index of the directory entries for this block
+        int startIdx = (i - (FAT_SIZE_IN_BLOCKS + 1)) * (BLOCKSIZE / sizeof(DirectoryEntry));
+        write_block(&rootDir[startIdx], i);
+    }    
 
 
     fsync (vs_fd); // synchronize kernel file cache with the disk
